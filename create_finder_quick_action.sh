@@ -176,3 +176,4 @@ EOF
 
 echo "✅ Installed Finder Quick Action: '${SERVICE_NAME}'"
 echo "👉 You can now right-click any image in Finder -> Quick Actions -> '${SERVICE_NAME}'"
+

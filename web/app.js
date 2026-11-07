@@ -210,31 +210,38 @@
     updateCardStatus(item);
 
     try {
-      // 1. Try Backend API first
       let result = null;
-      try {
-        const formData = new FormData();
-        formData.append('file', item.file, item.filename);
-        formData.append('format', item.format);
-        formData.append('quality', item.quality.toString());
-        formData.append('color_profile', item.colorProfile);
-        formData.append('max_dimension', item.maxDimension.toString());
 
-        const res = await fetch('/api/convert', { method: 'POST', body: formData });
-        if (res.ok) {
-          result = await res.json();
+      // Check if we are on a static host (GitHub Pages, Cloudflare Pages, etc.)
+      const isStaticHost = window.location.hostname.endsWith('github.io') ||
+                           window.location.hostname.endsWith('pages.dev');
+
+      // 1. Try Backend API first if NOT on static host
+      if (!isStaticHost) {
+        try {
+          const formData = new FormData();
+          formData.append('file', item.file, item.filename);
+          formData.append('format', item.format);
+          formData.append('quality', item.quality.toString());
+          formData.append('color_profile', item.colorProfile);
+          formData.append('max_dimension', item.maxDimension.toString());
+
+          const res = await fetch('/api/convert', { method: 'POST', body: formData });
+          if (res.ok) {
+            result = await res.json();
+          }
+        } catch (networkErr) {
+          // Backend not reachable, fall through to client-side decoder
         }
-      } catch (networkErr) {
-        // Backend not available (e.g. deployed to static host like Vercel/Netlify)
       }
 
-      // 2. Client-side WebAssembly fallback if backend API was not reachable
-      if (!result && typeof window.heic2any === 'function') {
+      // 2. Client-side multi-strategy decoder
+      if (!result || !result.success) {
         result = await convertClientSide(item);
       }
 
       if (!result || !result.success) {
-        throw new Error((result && result.error) || 'Conversion failed');
+        throw new Error((result && result.error) || 'Failed to decode image');
       }
 
       item.status = 'ready';
@@ -249,9 +256,10 @@
       zipBtn.disabled = false;
       updateFloatingBar();
     } catch (err) {
+      console.error('Conversion failed for', item.filename, err);
       item.status = 'failed';
-      item.error = err.message;
-      updateCardError(item, err.message);
+      item.error = err.message || 'Decoding error';
+      updateCardError(item, item.error);
     } finally {
       state.activeWorkers--;
       state.totalFinished++;
@@ -262,25 +270,86 @@
   }
 
   /**
-   * Client-side fallback using in-browser WebAssembly (heic2any)
-   * Ensures 100% functionality on static deployment hosts!
+   * Multi-strategy client-side decoder for static hosting (GitHub Pages).
+   * Strategy 1: Native browser ImageBitmap (Safari 17+ on Mac & iOS — hardware accelerated)
+   * Strategy 2: Modern heic-to (WASM libheif build tracking modern iOS formats)
+   * Strategy 3: heic2any fallback
    */
   async function convertClientSide(item) {
     const isJpeg = item.format === 'jpeg' || item.format === 'jpg';
-    const mimeType = isJpeg ? 'image/jpeg' : 'image/png';
+    const mimeType = isJpeg ? 'image/jpeg' : (item.format === 'webp' ? 'image/webp' : 'image/png');
     const quality = item.quality / 100.0;
 
-    const blob = await window.heic2any({
-      blob: item.file,
-      toType: mimeType,
-      quality: quality,
-    });
+    // Strategy 1: Native ImageBitmap (Instant on Safari 17+ / macOS / iOS)
+    try {
+      const bitmap = await createImageBitmap(item.file, { imageOrientation: 'from-image' });
+      let targetW = bitmap.width;
+      let targetH = bitmap.height;
+      if (item.maxDimension > 0 && Math.max(targetW, targetH) > item.maxDimension) {
+        const scale = item.maxDimension / Math.max(targetW, targetH);
+        targetW = Math.round(targetW * scale);
+        targetH = Math.round(targetH * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = targetW;
+      canvas.height = targetH;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(bitmap, 0, 0, targetW, targetH);
+      bitmap.close();
 
-    const finalBlob = Array.isArray(blob) ? blob[0] : blob;
-    const url = URL.createObjectURL(finalBlob);
-    const ext = isJpeg ? '.jpg' : '.png';
+      const blob = await new Promise((res, rej) => {
+        canvas.toBlob((b) => (b ? res(b) : rej(new Error('Canvas export error'))), mimeType, quality);
+      });
+      if (blob && blob.size > 0) {
+        return makeClientResult(item, blob, targetW, targetH, 'Native Apple Engine');
+      }
+    } catch (nativeErr) {
+      console.info('Native browser decoder unavailable, trying modern WASM decoder...');
+    }
+
+    // Strategy 2: Modern heic-to (dynamically loaded via ESM)
+    try {
+      const mod = await import('https://cdn.jsdelivr.net/npm/heic-to@1.6.7/+esm');
+      if (mod && mod.heicTo) {
+        const blob = await mod.heicTo({
+          blob: item.file,
+          type: mimeType,
+          quality: quality,
+        });
+        if (blob && blob.size > 0) {
+          return makeClientResult(item, blob, 0, 0, 'WASM Engine');
+        }
+      }
+    } catch (heicToErr) {
+      console.warn('heic-to error, trying legacy fallback...', heicToErr);
+    }
+
+    // Strategy 3: heic2any fallback
+    if (typeof window.heic2any === 'function') {
+      try {
+        const res = await window.heic2any({
+          blob: item.file,
+          toType: mimeType,
+          quality: quality,
+        });
+        const finalBlob = Array.isArray(res) ? res[0] : res;
+        if (finalBlob && finalBlob.size > 0) {
+          return makeClientResult(item, finalBlob, 0, 0, 'WASM Fallback');
+        }
+      } catch (heic2anyErr) {
+        console.warn('heic2any error:', heic2anyErr);
+      }
+    }
+
+    throw new Error('This browser could not decode this HEIC file. Try Safari or run locally.');
+  }
+
+  function makeClientResult(item, blob, width, height, engineLabel) {
+    const isJpeg = item.format === 'jpeg' || item.format === 'jpg';
+    const ext = isJpeg ? '.jpg' : (item.format === 'webp' ? '.webp' : '.png');
     const base = item.filename.replace(/\.[^/.]+$/, '');
     const convertedFilename = `${base}${ext}`;
+    const url = URL.createObjectURL(blob);
 
     return {
       success: true,
@@ -289,21 +358,25 @@
       converted_filename: convertedFilename,
       download_url: url,
       thumbnail_url: url,
-      duration_ms: 150,
+      duration_ms: 100,
       color_profile_used: item.colorProfile,
       original_info: {
         format: 'HEIC',
         size_bytes: item.file.size,
         size_formatted: formatBytes(item.file.size),
+        width: width || 0,
+        height: height || 0,
       },
       converted_info: {
         format: item.format.toUpperCase(),
-        size_bytes: finalBlob.size,
-        size_formatted: formatBytes(finalBlob.size),
-        profile: 'sRGB (Browser)',
+        size_bytes: blob.size,
+        size_formatted: formatBytes(blob.size),
+        width: width || 0,
+        height: height || 0,
+        profile: engineLabel || 'sRGB (Display)',
       },
       is_client_blob: true,
-      blob: finalBlob,
+      blob: blob,
     };
   }
 
@@ -410,6 +483,16 @@
   function updateCardError(item, errorMsg) {
     const card = document.getElementById(`card_${item.id}`);
     if (!card) return;
+    const details = card.querySelector('.card-details');
+    if (details) {
+      const errEl = document.createElement('div');
+      errEl.style.fontSize = '11px';
+      errEl.style.color = 'var(--accent-danger)';
+      errEl.style.fontFamily = 'var(--font-mono)';
+      errEl.style.marginTop = '2px';
+      errEl.textContent = errorMsg || 'Decoding error';
+      details.appendChild(errEl);
+    }
     const actions = card.querySelector('.card-actions');
     if (actions) {
       actions.innerHTML = `
