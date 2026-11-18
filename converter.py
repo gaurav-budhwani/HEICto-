@@ -336,6 +336,6 @@ if __name__ == "__main__":
         fmt = "png"
         out_file = f"{base}.png"
 
-    print(f"🍎 Converting: {in_file} -> {out_file} (ColorSync sRGB, Lossless)")
+    print(f"Converting: {in_file} -> {out_file} ({fmt.upper()})")
     res = convert_image(in_file, out_file, target_format=fmt, color_profile="srgb")
-    print(f"✅ Converted successfully ({res['info'].get('size_formatted', '')})")
+    print(f"Converted successfully ({res['info'].get('size_formatted', '')})")

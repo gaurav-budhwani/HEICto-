@@ -381,17 +381,17 @@ def run_server(port: Optional[int] = None):
     server_address = (env_host, actual_port)
     httpd = ThreadedHTTPServer(server_address, ConverterRequestHandler)
 
-    print("=" * 64)
-    print("  🍎 HEICto- — Professional Image Converter")
-    print(f"  ⚡ Listening on: http://{env_host}:{actual_port}")
+    print("=" * 48)
+    print("  HEICto-")
+    print(f"  Listening on: http://{env_host}:{actual_port}")
     support = converter.check_system_support()
-    print(f"  🎨 Engine: {support['engine']}")
-    print("=" * 64)
+    print(f"  Engine: {support['engine']}")
+    print("=" * 48)
 
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        print("\nGracefully shutting down...")
+        print("\nStopping server...")
         httpd.server_close()
 
 
